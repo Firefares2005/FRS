@@ -34,19 +34,18 @@ Get the latest library from GitHub Releases:
 
 Download `FRS-Library-1.1.0.zip`.
 
-### Step 2 — Extract
+## Step 2 — Extract
 
 Extract the archive to any folder, for example `C:\frs\`:
 
-C:\frs
-├── include
-│ └── frs.h Public header
-├── lib
-│ └── libfrs.a Static library
-└── README.md This file
+- `C:\frs\`
+  - `include\`
+    - `frs.h` — Public header
+  - `lib\`
+    - `libfrs.a` — Static library
+  - `README.md` — This file
 
-
-### Step 3 — Verify
+## Step 3 — Verify
 
 You should now have exactly **two files** that matter:
 
