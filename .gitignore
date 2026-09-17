@@ -1,9 +1,38 @@
-# Ignore EVERYTHING except source code
-/*
-!/.gitignore
-!/README.md
-!/CMakeLists.txt
-!/compare_final.py
-!/src/
-!/tests/
-!/LICENSE
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# pybind11 (downloaded, not tracked)
+python_bind/pybind11/
+python_bind/build/
+python_bind/dist/
+python_bind/*.egg-info/
+
+# General
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.frs
+*.nc
+*.pgm
+*.ppm
+*.pnm
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.jxl
+*.bmp
+.vscode/
+Thumbs.db
+.DS_Store
