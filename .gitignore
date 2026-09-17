@@ -1,28 +1,9 @@
-cd D:\FRS
-Set-Content .gitignore -Encoding UTF8 -Value @"
-# Build outputs
-build/
-*.o
-*.obj
-*.exe
-*.a
-*.lib
-
-# Compiled codec files
-*.nc
-*.pgm
-*.png
-*.jpg
-*.jpeg
-*.webp
-*.jxl
-
-# IDE
-.vscode/
-.vs/
-*.user
-
-# OS
-Thumbs.db
-.DS_Store
-"@
+# Ignore EVERYTHING except source code
+/*
+!/.gitignore
+!/README.md
+!/CMakeLists.txt
+!/compare_final.py
+!/src/
+!/tests/
+!/LICENSE
