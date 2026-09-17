@@ -111,16 +111,17 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
             }
     }
 
-    // Adaptive quantization factors
+        // ★ NC08.3: توزيع ذكي — LL أكثر حماية، HH أقل
     tree.factor.assign(N, 1.0f);
     for (int i = 0; i < N; i++) {
         int sb = tree.subband[i];
         int lv = tree.lev[i];
         float f;
-        if (lv == 0) f = 1.0f;
-        else {
-            f = 1.0f + 0.25f * (float)(L - lv);
-            if (sb == 3) f += 0.4f;
+        if (lv == 0) {
+            f = 0.72f;                       // LL: تكميم ألطف (كان 0.80)
+        } else {
+            f = 1.0f + 0.22f * (float)(L - lv);   // منحدر أقل
+            if (sb == 3) f += 0.42f;              // HH: تكميم أقوى (كان 0.30)
         }
         tree.factor[i] = f;
     }
