@@ -18,10 +18,12 @@ static int computeLevels(int W, int H) {
     return lv < 1 ? 1 : lv;
 }
 
-// -------------------- ترميز plane واحد --------------------
+// -------------------- ترميز plane واحد (NC05) --------------------
 static void encodePlane(RangeEncoder& enc, WaveletModels& m,
-                        std::vector<int>& qc, int w, int h) {
+                        std::vector<int>& qc, int w, int h, int L) {
     int N = w * h;
+
+    CoefInfo info = prepareCoefInfo(w, h, L);
 
     // Pass 1: IS_NZ map
     std::vector<uint8_t> nz(N, 0);
@@ -38,7 +40,7 @@ static void encodePlane(RangeEncoder& enc, WaveletModels& m,
                     if (nz[ny * w + nx]) nNZ++;
                 }
             if (nNZ > 4) nNZ = 4;
-            enc.encodeBit(m.nzCtx[nNZ], isNZ);
+            enc.encodeBit(m.nzCtx[nNZ][info.subband[i]], isNZ);
             nz[i] = isNZ;
         }
     }
@@ -54,40 +56,44 @@ static void encodePlane(RangeEncoder& enc, WaveletModels& m,
     if (maxBit > 0) maxBit--;
     encodeUInt(enc, m.maxBitLen, m.maxBitVal, (uint32_t)maxBit);
 
-    // Pass 2: bit planes
+    // Pass 2: bit planes (level-order scan)
     std::vector<uint8_t> sig(N, 0);
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                int i = y * w + x;
-                if (!nz[i]) continue;
+        for (int idx = 0; idx < N; idx++) {
+            int i = info.order[idx];
+            if (!nz[i]) continue;
 
-                int c = qc[i];
-                int mag = c < 0 ? -c : c;
+            int y = i / w, x = i % w;
+            int c = qc[i];
+            int mag = c < 0 ? -c : c;
+            int sb = info.subband[i];
 
-                if (!sig[i]) {
-                    int nsig = 0;
-                    for (int dy = -1; dy <= 1; dy++)
-                        for (int dx = -1; dx <= 1; dx++) {
-                            if (dx == 0 && dy == 0) continue;
-                            int nx = x + dx, ny = y + dy;
-                            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                            if (sig[ny * w + nx]) nsig++;
-                        }
-                    if (nsig > 3) nsig = 3;
-
-                    int isSig = (mag >= mask) ? 1 : 0;
-                    enc.encodeBit(m.sigCtx[nsig], isSig);
-                    if (isSig) {
-                        int s = (c < 0) ? 1 : 0;
-                        enc.encodeBit(m.signCtx, s);
-                        sig[i] = 1;
+            if (!sig[i]) {
+                int nsig = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                        if (sig[ny * w + nx]) nsig++;
                     }
-                } else {
-                    int b = (mag >> bit) & 1;
-                    enc.encodeBit(m.refCtx, b);
+                if (nsig > 3) nsig = 3;
+
+                int parentSig = 0;
+                int pi = info.parent[i];
+                if (pi >= 0 && sig[pi]) parentSig = 1;
+
+                int isSig = (mag >= mask) ? 1 : 0;
+                enc.encodeBit(m.sigCtx[nsig][sb][parentSig], isSig);
+                if (isSig) {
+                    int s = (c < 0) ? 1 : 0;
+                    enc.encodeBit(m.signCtx[sb], s);
+                    sig[i] = 1;
                 }
+            } else {
+                int b = (mag >> bit) & 1;
+                enc.encodeBit(m.refCtx[sb], b);
             }
         }
     }
@@ -101,7 +107,7 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
 
     const int levels = computeLevels(W, H);
 
-    // ★ التعديل: معادلة تكميم جديدة (خطية بدل تربيعية)
+    // معادلة التكميم
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
     float step = 1.0f + (float)(qn * 80.0f);
 
@@ -151,7 +157,7 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     RangeEncoder enc;
     WaveletModels wm;
 
-    enc.encodeBit(wm.nzCtx[0], (C == 3) ? 1 : 0);
+    enc.encodeBit(wm.nzCtx[0][0], (C == 3) ? 1 : 0);
 
     for (size_t p = 0; p < planes.size(); p++) {
         int pw = planeSizes[p].first;
@@ -163,16 +169,16 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
         for (int i = 0; i < pw * ph; i++)
             qc[i] = (int)std::lround(planes[p][i] / step);
 
-        encodePlane(enc, wm, qc, pw, ph);
+        encodePlane(enc, wm, qc, pw, ph, levels);
     }
 
     enc.flush();
 
-    // -------- الترويسة NC04 --------
+    // -------- الترويسة NC05 --------
     std::vector<uint8_t> out;
     out.reserve(enc.data().size() + 14);
     out.push_back('N'); out.push_back('C');
-    out.push_back('0'); out.push_back('4');
+    out.push_back('0'); out.push_back('5');
     auto push32 = [&](uint32_t v) {
         out.push_back((uint8_t)( v        & 0xFF));
         out.push_back((uint8_t)((v >>  8) & 0xFF));

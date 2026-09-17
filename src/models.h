@@ -4,14 +4,19 @@
 
 namespace codec {
 
-// نماذج ترميز wavelet bit-plane
+// ---------- نماذج NC05 ----------
+// Contexts:
+//   nzCtx[5][4]     : IS_NZ — [neighbor count 0..4][subband 0..3]
+//   sigCtx[4][4][2] : significance — [nsig 0..3][subband 0..3][parent_sig]
+//   signCtx[4]      : sign — [subband]
+//   refCtx[4]       : refinement — [subband]
 struct WaveletModels {
-    BitModel nzCtx[5];          // IS_NZ context: عدد الجيران غير الصفرية (0-4)
-    BitModel maxBitLen[24];     // exp-golomb لعدد البتات الأقصى
+    BitModel nzCtx[5][4];
+    BitModel maxBitLen[24];
     BitModel maxBitVal[24];
-    BitModel sigCtx[4];         // significance: عدد الجيران المُهمَّة (0-3)
-    BitModel signCtx;           // إشارة
-    BitModel refCtx;            // refinement bit
+    BitModel sigCtx[4][4][2];
+    BitModel signCtx[4];
+    BitModel refCtx[4];
 };
 
 inline uint32_t zigzagSigned(int v) {
@@ -40,5 +45,15 @@ inline uint32_t decodeUInt(RangeDecoder& dec, BitModel* len, BitModel* val) {
         rem = (rem << 1) | (uint32_t)dec.decodeBit(val[i]);
     return ((uint32_t)1 << k) + rem - 1;
 }
+
+// ---------- بنية معلومات المعاملات ----------
+struct CoefInfo {
+    std::vector<uint8_t> subband;   // 0=LL, 1=HL, 2=LH, 3=HH
+    std::vector<uint8_t> lev;       // 0=LL, 1..L=detail
+    std::vector<int>     parent;    // -1 if none
+    std::vector<int>     order;     // scan order (coarse → fine)
+};
+
+CoefInfo prepareCoefInfo(int W, int H, int L);
 
 } // namespace codec
