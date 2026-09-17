@@ -1,0 +1,40 @@
+Metadata-Version: 2.4
+Name: frs-codec
+Version: 1.1.0
+Summary: FRS image compression library - Python bindings
+Home-page: https://github.com/Firefares2005/FRS
+Author: Firefares2005
+Author-email: firefares2005@example.com
+License: MIT
+Classifier: Programming Language :: C++
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Multimedia :: Graphics :: Graphics Conversion
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: pybind11>=2.10
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+﻿# frs-codec
+
+Python bindings for the FRS image compression library.
+
+## Install
+
+    pip install frs-codec
+
+## Usage
+
+    import frs_python
+
+    frs_python.compress("photo.jpg", "photo.frs", 85)
+    frs_python.decompress("photo.frs", "restored.png")
