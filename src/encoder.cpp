@@ -54,7 +54,7 @@ static void encodePlane(RangeEncoder& enc, WaveletModels& m,
     if (maxBit > 0) maxBit--;
     encodeUInt(enc, m.maxBitLen, m.maxBitVal, (uint32_t)maxBit);
 
-    // Pass 2: bit planes (فقط على non-zero)
+    // Pass 2: bit planes
     std::vector<uint8_t> sig(N, 0);
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
@@ -101,9 +101,9 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
 
     const int levels = computeLevels(W, H);
 
-    // خطوة التكميم: q=100 → 1، q=0 → 40 تقريباً
+    // ★ التعديل: معادلة تكميم جديدة (خطية بدل تربيعية)
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
-    float step = 1.0f + (float)(qn * qn * 40.0);
+    float step = 1.0f + (float)(qn * 80.0f);
 
     // -------- تجهيز الـ planes --------
     std::vector<std::vector<float>> planes;
@@ -125,7 +125,6 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
             Cb[i] = -0.1687f*R - 0.3313f*G + 0.5f*B;
             Cr[i] =  0.5f*R - 0.4187f*G - 0.0813f*B;
         }
-        // 4:2:0 subsample
         int sw = (W + 1) / 2, sh = (H + 1) / 2;
         std::vector<float> Cbs(sw * sh), Crs(sw * sh);
         for (int y = 0; y < sh; y++)
@@ -158,15 +157,12 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
         int pw = planeSizes[p].first;
         int ph = planeSizes[p].second;
 
-        // Wavelet transform
         dwt2d(planes[p], pw, ph, levels);
 
-        // تكميم
         std::vector<int> qc(pw * ph);
         for (int i = 0; i < pw * ph; i++)
             qc[i] = (int)std::lround(planes[p][i] / step);
 
-        // ترميز
         encodePlane(enc, wm, qc, pw, ph);
     }
 

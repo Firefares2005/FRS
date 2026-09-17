@@ -103,8 +103,10 @@ Image decodeImage(const std::vector<uint8_t>& data) {
     if (W <= 0 || H <= 0) throw std::runtime_error("decodeImage: bad size");
 
     const int levels = computeLevels(W, H);
+
+    // ★ نفس معادلة التكميم الجديدة (يجب أن تطابق encoder)
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
-    float step = 1.0f + (float)(qn * qn * 40.0);
+    float step = 1.0f + (float)(qn * 80.0f);
 
     RangeDecoder dec(data.data() + 14, data.size() - 14);
     WaveletModels wm;
@@ -118,7 +120,6 @@ Image decodeImage(const std::vector<uint8_t>& data) {
 
     int sw = (W + 1) / 2, sh = (H + 1) / 2;
 
-    // فك plane Y
     {
         std::vector<int> qc = decodePlane(dec, wm, W, H);
         std::vector<float> plane(W * H);
@@ -133,23 +134,20 @@ Image decodeImage(const std::vector<uint8_t>& data) {
             }
             return img;
         }
-        // خزّن Y مؤقتاً
+
         std::vector<float> Yv(W * H);
         for (int i = 0; i < W * H; i++) Yv[i] = plane[i] + 128.0f;
 
-        // Cb
         std::vector<int> qcB = decodePlane(dec, wm, sw, sh);
         std::vector<float> Cbv(sw * sh);
         for (int i = 0; i < sw * sh; i++) Cbv[i] = (float)qcB[i] * step;
         idwt2d(Cbv, sw, sh, levels);
 
-        // Cr
         std::vector<int> qcR = decodePlane(dec, wm, sw, sh);
         std::vector<float> Crv(sw * sh);
         for (int i = 0; i < sw * sh; i++) Crv[i] = (float)qcR[i] * step;
         idwt2d(Crv, sw, sh, levels);
 
-        // YCbCr → RGB مع upsampling للـ Cb/Cr
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
                 float Y  = Yv[y * W + x];
