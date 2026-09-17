@@ -194,6 +194,8 @@ int main() {
     }
     return 0;
 }
+
+
 FAQ
 Q: Does it require SDL or any other library?
 No. Only the C++ standard library.
