@@ -19,15 +19,13 @@ pip install frs-codec
 ```
 
 ```python
-import frs_python
+import frs_python as f
 
-frs_python.compress("photo.jpg", "photo.frs", 85)
-frs_python.decompress("photo.frs", "restored.png")
+f.compress("photo.jpg", "photo.frs", 85)
+f.decompress("photo.frs", "restored.png")
 ```
 
-### 🖥️ Command-line tool (Windows)
-
-Download `frs.exe` from Releases and run:
+### 🖥️ Command-line tool
 
 ```bash
 frs.exe encode photo.jpg photo.frs 85
@@ -36,7 +34,7 @@ frs.exe decode photo.frs restored.png
 
 ### 📚 C++ library
 
-See `dist/README.md` for full documentation.
+See `dist/README.md` for details.
 
 ```bash
 g++ app.cpp -IC:\frs\include -LC:\frs\lib -lfrs -o app.exe
@@ -44,7 +42,80 @@ g++ app.cpp -IC:\frs\include -LC:\frs\lib -lfrs -o app.exe
 
 ---
 
-## 🎯 Benchmark
+## 🐍 Python API — 13 Functions
+
+| Function | Description |
+|----------|--------------|
+| `compress(input, output, quality=85)` | Compress image file to .frs |
+| `decompress(input, output)` | Decompress .frs to image |
+| `encode(image_path, quality=85)` | Encode file to FRS bytes |
+| `decode(frs_bytes, output_path)` | Decode bytes to image file |
+| `encode_bytes(image_bytes, quality=85)` | Encode image bytes to FRS bytes |
+| `decode_bytes(frs_bytes)` | Decode to (w, h, channels, pixels) |
+| `version()` | Return version string |
+| `info(frs_file)` | Return dict: width, height, quality, channels |
+| `is_frs(path)` | Check if file is FRS format |
+| `benchmark(image_path, quality=85)` | Return size ratio + encoding time |
+| `compare(original, frs_file)` | Return PSNR + compression ratio |
+| `batch_compress(files, output_dir, quality=85)` | Compress multiple files |
+| `get_default_quality()` | Return default quality (85) |
+
+### Examples
+
+**Basic compression:**
+
+```python
+import frs_python as f
+f.compress("photo.jpg", "photo.frs", 85)
+f.decompress("photo.frs", "restored.png")
+```
+
+**Get file info:**
+
+```python
+info = f.info("photo.frs")
+print(f"{info['width']}x{info['height']}, quality={info['quality']}")
+# Output: 400x400, quality=85
+```
+
+**Benchmark performance:**
+
+```python
+stats = f.benchmark("photo.jpg", 85)
+print(f"Ratio: {stats['ratio']:.2f}x, Time: {stats['time_ms']:.1f}ms")
+```
+
+**Compare quality:**
+
+```python
+r = f.compare("photo.jpg", "photo.frs")
+print(f"PSNR: {r['psnr']:.2f} dB, Ratio: {r['ratio']:.2f}x")
+```
+
+**Batch compress:**
+
+```python
+files = ["a.jpg", "b.png", "c.bmp"]
+results = f.batch_compress(files, "./compressed", 85)
+for name, ok in results:
+    print(f"{name}: {'OK' if ok else 'FAIL'}")
+```
+
+**In-memory (networking / APIs):**
+
+```python
+with open("photo.jpg", "rb") as fp:
+    image_bytes = fp.read()
+frs_bytes = f.encode_bytes(image_bytes, 85)
+
+# Send over network...
+
+w, h, channels, pixels = f.decode_bytes(frs_bytes)
+```
+
+---
+
+## 📊 Benchmark Results
 
 ### Small images (256×256, quality 85)
 
@@ -57,11 +128,11 @@ g++ app.cpp -IC:\frs\include -LC:\frs\lib -lfrs -o app.exe
 
 ### Large images (1024×1024, quality 85)
 
-| Codec   | t1     | t2     | t3     |
-|---------|--------|--------|--------|
-| **FRS** | 37,675 | 33,401 | 50,690 |
-| JPEG XL | 70,573 | 68,005 | 95,373 |
-| WebP    | 73,222 | 69,092 | 103,908|
+| Codec   | t1     | t2     | t3      |
+|---------|--------|--------|---------|
+| **FRS** | 37,675 | 33,401 | 50,690  |
+| JPEG XL | 70,573 | 68,005 | 95,373  |
+| WebP    | 73,222 | 69,092 | 103,908 |
 
 **FRS produces files 15–50% smaller than JPEG XL on typical images.**
 
@@ -69,17 +140,15 @@ g++ app.cpp -IC:\frs\include -LC:\frs\lib -lfrs -o app.exe
 
 ## 🧠 How it works
 
-Pipeline:
-
 1. **Color conversion**: RGB → YCbCr with adaptive 4:4:4 / 4:2:0 sampling
 2. **CDF 9/7 Wavelet Transform** (5–6 levels)
 3. **Adaptive subband quantization**
-4. **SPIHT entropy coding** (Set Partitioning In Hierarchical Trees)
-5. **LZMA-style Range Coder** with context-adaptive models
+4. **SPIHT entropy coding**
+5. **LZMA-style Range Coder**
 
 ---
 
-## 📁 Project structure
+## 📁 Project Structure
 
 ```text
 FRS/
@@ -95,7 +164,8 @@ FRS/
 ├── python_bind/           ← Python bindings
 │   ├── pyfrs.cpp
 │   ├── setup.py
-│   └── pyproject.toml
+│   ├── pyproject.toml
+│   └── MANIFEST.in
 └── src/                   ← source code
     ├── entropy.h/.cpp
     ├── wavelet.h
@@ -121,7 +191,7 @@ g++ -std=c++17 -O3 -Isrc \
 
 ---
 
-## 📝 File format (NC09)
+## 📝 File Format (NC09)
 
 | Field    | Size    | Description               |
 |----------|---------|----------------------------|
@@ -142,11 +212,13 @@ Images with dimensions not divisible by 64 are auto-padded and cropped.
 - [x] Adaptive quantization
 - [x] PNG/JPG direct support
 - [x] Arbitrary image dimensions
-- [x] C++ library
-- [x] Python bindings (PyPI)
+- [x] C++ library (`libfrs.a`)
+- [x] Python bindings (PyPI: `frs-codec`)
+- [x] 13-function Python API
 - [ ] WebAssembly (browser)
 - [ ] Lossless mode
 - [ ] Alpha channel support
+- [ ] HDR / 16-bit support
 
 ---
 
