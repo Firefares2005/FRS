@@ -7,22 +7,20 @@
 
 namespace codec {
 
-// ---------- نماذج SPIHT (سياق منفصل لكل subband) ----------
 struct SpihtModels {
     BitModel maxBitLen[24];
     BitModel maxBitVal[24];
-    BitModel sigCtx[4];       // significance of individual pixel
-    BitModel signCtx[4];      // sign bit
-    BitModel setSigACtx[4];   // significance of D(i)
-    BitModel setSigBCtx[4];   // significance of L(i)
-    BitModel refCtx[4];       // refinement
+    BitModel sigCtx[4];
+    BitModel signCtx[4];
+    BitModel setSigACtx[4];
+    BitModel setSigBCtx[4];
+    BitModel refCtx[4];
 };
 
-// ---------- شجرة SPIHT ----------
 struct SpihtTree {
     int W, H, L;
     std::vector<int> parent;
-    std::vector<uint8_t> subband;   // 0=LL, 1=HL, 2=LH, 3=HH
+    std::vector<uint8_t> subband;
     std::vector<std::vector<int>> children;
     std::vector<int> llPixels;
 };
@@ -42,7 +40,6 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
         Hk[k] = (Hk[k-1] + 1) / 2;
     }
 
-    // LL pixels
     for (int y = 0; y < Hk[L]; y++)
         for (int x = 0; x < Wk[L]; x++) {
             int i = y * W + x;
@@ -101,7 +98,6 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
     return tree;
 }
 
-// ---------- exp-golomb helpers ----------
 inline void spihtEncodeUInt(RangeEncoder& enc, BitModel* len, BitModel* val, uint32_t v) {
     uint32_t x = v + 1;
     int k = 0;
@@ -122,7 +118,6 @@ inline uint32_t spihtDecodeUInt(RangeDecoder& dec, BitModel* len, BitModel* val)
     return ((uint32_t)1 << k) + rem - 1;
 }
 
-// ---------- pre-compute maxDescBit / maxGrandBit ----------
 inline void dfsMaxDesc(int i, const SpihtTree& tree,
                        const std::vector<int>& coefBit,
                        std::vector<int>& maxDescBit) {
@@ -135,12 +130,11 @@ inline void dfsMaxDesc(int i, const SpihtTree& tree,
     maxDescBit[i] = mx;
 }
 
-// ---------- Encoder ----------
+// ---------- Encoder (FIXED) ----------
 inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                         std::vector<int>& coefs, const SpihtTree& tree) {
     int N = (int)coefs.size();
 
-    // maxBit
     int maxAbs = 0;
     for (int i = 0; i < N; i++) {
         int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
@@ -151,7 +145,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
     if (maxBit > 0) maxBit--;
     spihtEncodeUInt(enc, m.maxBitLen, m.maxBitVal, (uint32_t)maxBit);
 
-    // precompute coefBit + maxDescBit
     std::vector<int> coefBit(N, -1);
     for (int i = 0; i < N; i++) {
         int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
@@ -163,14 +156,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
     }
     std::vector<int> maxDescBit(N, -1);
     for (int r : tree.llPixels) dfsMaxDesc(r, tree, coefBit, maxDescBit);
-
-    std::vector<int> maxGrandBit(N, -1);
-    for (int i = 0; i < N; i++) {
-        int mx = -1;
-        for (int c : tree.children[i])
-            if (maxDescBit[c] > mx) mx = maxDescBit[c];
-        maxGrandBit[i] = mx;
-    }
 
     std::vector<int> LIP = tree.llPixels;
     std::vector<int> LSP;
@@ -230,13 +215,27 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                             LIP.push_back(c);
                         }
                     }
-                    if (maxGrandBit[i] >= 0) LIS.push_back({i, 1});
+                    // ★ FIX: البنية فقط (مطابقة للـ decoder)
+                    bool hasGrand = false;
+                    for (int c : tree.children[i])
+                        if (!tree.children[c].empty()) { hasGrand = true; break; }
+                    if (hasGrand) LIS.push_back({i, 1});
                     LIS.erase(LIS.begin() + lisIdx);
                     continue;
                 }
                 lisIdx++;
             } else {
-                bool sig = (maxGrandBit[i] >= bit);
+                bool sig = false;
+                {
+                    // Sn(L(i)): هل يوجد أي حفيد ذو قيمة >= bit؟
+                    int mx = -1;
+                    for (int c : tree.children[i])
+                        for (int g : tree.children[c]) {
+                            int ga = coefs[g] < 0 ? -coefs[g] : coefs[g];
+                            if (ga > mx) mx = ga;
+                        }
+                    sig = (mx >= mask);
+                }
                 enc.encodeBit(m.setSigBCtx[sb], sig ? 1 : 0);
                 if (sig) {
                     for (int c : tree.children[i]) LIS.push_back({c, 0});
@@ -278,7 +277,6 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
 
-        // ---- LIP ----
         int lipSnapshot = (int)LIP.size();
         for (int k = 0; k < lipSnapshot; k++) {
             int i = LIP[k];
@@ -300,7 +298,6 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
             LIP.swap(newLIP);
         }
 
-        // ---- LIS ----
         int lisIdx = 0;
         while (lisIdx < (int)LIS.size()) {
             LisEntry e = LIS[lisIdx];
@@ -322,7 +319,6 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
                             LIP.push_back(c);
                         }
                     }
-                    // same condition: node has grandchildren
                     bool hasGrand = false;
                     for (int c : tree.children[i])
                         if (!tree.children[c].empty()) { hasGrand = true; break; }
@@ -342,7 +338,6 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
             }
         }
 
-        // ---- Refinement ----
         for (int k = 0; k < lspRefStart; k++) {
             int i = LSP[k];
             int b = dec.decodeBit(m.refCtx[tree.subband[i]]);
