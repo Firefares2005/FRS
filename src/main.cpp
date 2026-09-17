@@ -1,19 +1,17 @@
 #include "encoder.h"
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <iostream>
 
 using namespace codec;
 
 static void usage(const char* a0) {
     std::fprintf(stderr,
-        "new-codec CLI\n"
-        "  %s encode <input.pgm> <output.nc> [quality=80]\n"
-        "  %s decode <input.nc>  <output.pgm>\n",
+        "new-codec v4 (NC04 wavelet)\n"
+        "  %s encode <in.pgm|in.ppm> <out.nc> [quality=80]\n"
+        "  %s decode <in.nc> <out.pgm|out.ppm>\n",
         a0, a0);
 }
 
@@ -24,25 +22,27 @@ int main(int argc, char** argv) {
     try {
         if (cmd == "encode") {
             int q = (argc >= 5) ? std::atoi(argv[4]) : 80;
-            Image img = readPGM(argv[2]);
+            Image img = readImage(argv[2]);
             auto data = encodeImage(img, q);
             std::ofstream f(argv[3], std::ios::binary);
             f.write((const char*)data.data(), (std::streamsize)data.size());
-            double ratio = (double)img.pixels.size() / (double)data.size();
+
+            size_t raw = img.pixels.size();
             std::fprintf(stderr,
-                "encoded %dx%d -> %zu bytes (q=%d, ratio=%.2fx)\n",
-                img.width, img.height, data.size(), q, ratio);
+                "encoded %dx%d ch=%d -> %zu bytes (q=%d, ratio=%.2fx)\n",
+                img.width, img.height, img.channels,
+                data.size(), q, (double)raw / data.size());
         } else if (cmd == "decode") {
             std::ifstream f(argv[2], std::ios::binary);
             std::vector<uint8_t> data(
                 (std::istreambuf_iterator<char>(f)),
                  std::istreambuf_iterator<char>());
             Image img = decodeImage(data);
-            writePGM(argv[3], img);
-            std::fprintf(stderr, "decoded %dx%d\n", img.width, img.height);
+            writeImage(argv[3], img, img.channels == 3);
+            std::fprintf(stderr, "decoded %dx%d ch=%d\n",
+                         img.width, img.height, img.channels);
         } else {
-            usage(argv[0]);
-            return 1;
+            usage(argv[0]); return 1;
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

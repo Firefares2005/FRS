@@ -1,17 +1,93 @@
 #include "encoder.h"
-#include "transform.h"
+#include "wavelet.h"
 #include "models.h"
 
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <algorithm>
 
 namespace codec {
 
+static int computeLevels(int W, int H) {
+    int s = std::min(W, H);
+    int lv = 0;
+    while (s > 8 && lv < 6) { s /= 2; lv++; }
+    return lv < 1 ? 1 : lv;
+}
+
+// -------------------- فك ترميز plane --------------------
+static std::vector<int> decodePlane(RangeDecoder& dec, WaveletModels& m,
+                                    int w, int h) {
+    int N = w * h;
+    std::vector<int> qc(N, 0);
+
+    // Pass 1: IS_NZ
+    std::vector<uint8_t> nz(N, 0);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int i = y * w + x;
+            int nNZ = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    if (nz[ny * w + nx]) nNZ++;
+                }
+            if (nNZ > 4) nNZ = 4;
+            nz[i] = (uint8_t)dec.decodeBit(m.nzCtx[nNZ]);
+        }
+    }
+
+    int maxBit = (int)decodeUInt(dec, m.maxBitLen, m.maxBitVal);
+
+    // Pass 2: bit planes
+    std::vector<uint8_t> sig(N, 0);
+    for (int bit = maxBit; bit >= 0; bit--) {
+        int mask = 1 << bit;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int i = y * w + x;
+                if (!nz[i]) continue;
+
+                if (!sig[i]) {
+                    int nsig = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dx == 0 && dy == 0) continue;
+                            int nx = x + dx, ny = y + dy;
+                            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                            if (sig[ny * w + nx]) nsig++;
+                        }
+                    if (nsig > 3) nsig = 3;
+
+                    int isSig = dec.decodeBit(m.sigCtx[nsig]);
+                    if (isSig) {
+                        int s = dec.decodeBit(m.signCtx);
+                        qc[i] = mask;
+                        if (s) qc[i] = -qc[i];
+                        sig[i] = 1;
+                    }
+                } else {
+                    int b = dec.decodeBit(m.refCtx);
+                    if (b) {
+                        if (qc[i] > 0) qc[i] |= mask;
+                        else           qc[i] = -((-qc[i]) | mask);
+                    }
+                }
+            }
+        }
+    }
+
+    return qc;
+}
+
+// -------------------- الفك الكامل --------------------
 Image decodeImage(const std::vector<uint8_t>& data) {
-    if (data.size() < 13) throw std::runtime_error("decodeImage: too small");
-    if (!(data[0]=='N' && data[1]=='C' && data[2]=='0' && data[3]=='3'))
-        throw std::runtime_error("decodeImage: bad magic (expect NC03)");
+    if (data.size() < 14) throw std::runtime_error("decodeImage: too small");
+    if (!(data[0]=='N' && data[1]=='C' && data[2]=='0' && data[3]=='4'))
+        throw std::runtime_error("decodeImage: bad magic (expect NC04)");
 
     auto rd32 = [&](size_t off) -> uint32_t {
         return  (uint32_t)data[off]
@@ -20,163 +96,83 @@ Image decodeImage(const std::vector<uint8_t>& data) {
              | ((uint32_t)data[off+3] << 24);
     };
 
-    const int W = (int)rd32(4), H = (int)rd32(8);
+    const int W = (int)rd32(4);
+    const int H = (int)rd32(8);
     const int quality = (int)data[12];
+    const int C = (int)data[13];
     if (W <= 0 || H <= 0) throw std::runtime_error("decodeImage: bad size");
 
-    auto Q8  = makeQuantTable(quality);
-    auto Q16 = makeQuantTable16(quality);
+    const int levels = computeLevels(W, H);
+    double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
+    float step = 1.0f + (float)(qn * qn * 40.0);
 
-    RangeDecoder dec(data.data() + 13, data.size() - 13);
-    CoefModels   m8;
-    CoefModels16 m16;
+    RangeDecoder dec(data.data() + 14, data.size() - 14);
+    WaveletModels wm;
+
+    int isColor = dec.decodeBit(wm.nzCtx[0]);
 
     Image img;
     img.width = W; img.height = H;
-    img.pixels.assign((size_t)W * H, 0);
+    img.channels = isColor ? 3 : 1;
+    img.pixels.assign((size_t)W * H * img.channels, 0);
 
-    const int mbx = (W + 15) / 16;
-    const int mby = (H + 15) / 16;
+    int sw = (W + 1) / 2, sh = (H + 1) / 2;
 
-    std::vector<int> dcRowPrevM(mbx + 1, 0), dcRowCurM(mbx + 1, 0);
-    int dcPrevLeftM = 0;
+    // فك plane Y
+    {
+        std::vector<int> qc = decodePlane(dec, wm, W, H);
+        std::vector<float> plane(W * H);
+        for (int i = 0; i < W * H; i++) plane[i] = (float)qc[i] * step;
+        idwt2d(plane, W, H, levels);
 
-    auto writeBlock = [&](const Block& blk, int byi, int bxi) {
-        for (int y = 0; y < 8; y++) {
-            int sy = byi * 8 + y; if (sy >= H) continue;
-            for (int x = 0; x < 8; x++) {
-                int sx = bxi * 8 + x; if (sx >= W) continue;
-                int v = (int)std::lround(blk[y][x] + 128.0f);
+        if (!isColor) {
+            for (int i = 0; i < W * H; i++) {
+                int v = (int)std::lround(plane[i] + 128.0f);
                 if (v < 0) v = 0; if (v > 255) v = 255;
-                img.pixels[(size_t)sy * W + sx] = (uint8_t)v;
+                img.pixels[i] = (uint8_t)v;
+            }
+            return img;
+        }
+        // خزّن Y مؤقتاً
+        std::vector<float> Yv(W * H);
+        for (int i = 0; i < W * H; i++) Yv[i] = plane[i] + 128.0f;
+
+        // Cb
+        std::vector<int> qcB = decodePlane(dec, wm, sw, sh);
+        std::vector<float> Cbv(sw * sh);
+        for (int i = 0; i < sw * sh; i++) Cbv[i] = (float)qcB[i] * step;
+        idwt2d(Cbv, sw, sh, levels);
+
+        // Cr
+        std::vector<int> qcR = decodePlane(dec, wm, sw, sh);
+        std::vector<float> Crv(sw * sh);
+        for (int i = 0; i < sw * sh; i++) Crv[i] = (float)qcR[i] * step;
+        idwt2d(Crv, sw, sh, levels);
+
+        // YCbCr → RGB مع upsampling للـ Cb/Cr
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                float Y  = Yv[y * W + x];
+                int cx = x / 2, cy = y / 2;
+                if (cx >= sw) cx = sw - 1;
+                if (cy >= sh) cy = sh - 1;
+                float Cb = Cbv[cy * sw + cx];
+                float Cr = Crv[cy * sw + cx];
+
+                float R = Y + 1.402f * Cr;
+                float G = Y - 0.344136f * Cb - 0.714136f * Cr;
+                float B = Y + 1.772f * Cb;
+
+                auto clip = [](float v) {
+                    int i = (int)std::lround(v);
+                    return (uint8_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
+                };
+                int idx = (y * W + x) * 3;
+                img.pixels[idx + 0] = clip(R);
+                img.pixels[idx + 1] = clip(G);
+                img.pixels[idx + 2] = clip(B);
             }
         }
-    };
-
-    for (int my = 0; my < mby; my++) {
-        dcPrevLeftM = 0;
-        for (int mx = 0; mx < mbx; mx++) {
-            int baseY = my * 16, baseX = mx * 16;
-
-            int dcLeftM = dcPrevLeftM;
-            int dcUpM   = dcRowPrevM[mx + 1];
-            int dcPredM;
-            if (mx == 0 && my == 0) dcPredM = 0;
-            else if (mx == 0)       dcPredM = dcUpM;
-            else if (my == 0)       dcPredM = dcLeftM;
-            else                    dcPredM = (dcLeftM + dcUpM) / 2;
-
-            int ctxM = classifyContext(dcLeftM, dcUpM);
-
-            int use16bit = dec.decodeBit(m16.blockType);
-            bool use16 = (use16bit == 0);
-
-            if (use16) {
-                int isSkip = dec.decodeBit(m16.skipFlag);
-                Block16 coefs16{};
-                int dc;
-                if (isSkip) {
-                    dc = dcPredM;
-                    for (int y = 0; y < 16; y++)
-                        for (int x = 0; x < 16; x++)
-                            coefs16[y][x] = 0.0f;
-                    coefs16[0][0] = (float)dc * (float)Q16[0][0];
-                } else {
-                    int dcRes = unzigzagSigned(
-                        decodeUInt(dec, m16.dcLen[ctxM], m16.dcVal[ctxM]));
-                    dc = dcPredM + dcRes;
-
-                    int lastNZ = 0;
-                    for (int i = 7; i >= 0; i--)
-                        lastNZ |= dec.decodeBit(m16.eobBits[i]) << i;
-
-                    int zz[256]; std::memset(zz, 0, sizeof(zz));
-                    zz[0] = dc;
-                    if (lastNZ > 0) {
-                        int pos = 1;
-                        while (pos <= lastNZ) {
-                            int run = decodeZeroRun(dec, m16.zeroRun);
-                            pos += run;
-                            if (pos > lastNZ) break;
-                            int c = acClass(pos);
-                            zz[pos] = unzigzagSigned(
-                                decodeUInt(dec, m16.acLen[c][ctxM], m16.acVal[c][ctxM]));
-                            pos++;
-                        }
-                    }
-                    for (int y = 0; y < 16; y++)
-                        for (int x = 0; x < 16; x++)
-                            coefs16[y][x] = (float)zz[ZIGZAG16[y*16+x]] * (float)Q16[y][x];
-                }
-
-                Block16 pix16;
-                idct2dT<16>(coefs16, pix16);
-
-                for (int y = 0; y < 16; y++) {
-                    int sy = baseY + y; if (sy >= H) continue;
-                    for (int x = 0; x < 16; x++) {
-                        int sx = baseX + x; if (sx >= W) continue;
-                        int v = (int)std::lround(pix16[y][x] + 128.0f);
-                        if (v < 0) v = 0; if (v > 255) v = 255;
-                        img.pixels[(size_t)sy * W + sx] = (uint8_t)v;
-                    }
-                }
-
-                dcRowCurM[mx+1] = dc;
-                dcPrevLeftM     = dc;
-
-            } else {
-                // ---------- 4 × 8×8 ----------
-                int lastDC = dcPredM;
-                for (int sy = 0; sy < 2; sy++) {
-                    for (int sx = 0; sx < 2; sx++) {
-                        int dcPred = dcPredM;
-                        int ctx = ctxM;
-
-                        int isSkip = dec.decodeBit(m8.skipFlag);
-                        int zz[64]; std::memset(zz, 0, sizeof(zz));
-
-                        if (isSkip) {
-                            zz[0] = dcPred;
-                        } else {
-                            int dcRes = unzigzagSigned(
-                                decodeUInt(dec, m8.dcLen[ctx], m8.dcVal[ctx]));
-                            zz[0] = dcPred + dcRes;
-
-                            int lastNZ = 0;
-                            for (int i = 5; i >= 0; i--)
-                                lastNZ |= dec.decodeBit(m8.eobBits[i]) << i;
-
-                            if (lastNZ > 0) {
-                                int pos = 1;
-                                while (pos <= lastNZ) {
-                                    int run = decodeZeroRun(dec, m8.zeroRun);
-                                    pos += run;
-                                    if (pos > lastNZ) break;
-                                    int c = acClass(pos);
-                                    zz[pos] = unzigzagSigned(
-                                        decodeUInt(dec, m8.acLen[c][ctx], m8.acVal[c][ctx]));
-                                    pos++;
-                                }
-                            }
-                            lastDC = zz[0];
-                        }
-
-                        Block coefs{};
-                        for (int y = 0; y < 8; y++)
-                            for (int x = 0; x < 8; x++)
-                                coefs[y][x] = (float)zz[ZIGZAG[y*8+x]] * (float)Q8[y][x];
-
-                        Block blk;
-                        idct2d(coefs, blk);
-                        writeBlock(blk, my*2 + sy, mx*2 + sx);
-                    }
-                }
-                dcRowCurM[mx+1] = lastDC;
-                dcPrevLeftM     = lastDC;
-            }
-        }
-        std::swap(dcRowPrevM, dcRowCurM);
     }
 
     return img;
