@@ -52,12 +52,13 @@ Image decodeImage(const std::vector<uint8_t>& data) {
     // ---- decode Y plane ----
     {
         int pw = W, ph = H;
-        int pl = computeLevels(pw, ph);
+                int pl = computeLevels(pw, ph);
         SpihtTree tree = buildSpihtTree(pw, ph, pl);
         std::vector<int> qc = spihtDecode(dec, wm, tree);
 
         std::vector<float> plane(pw * ph);
-        for (int i = 0; i < pw * ph; i++) plane[i] = (float)qc[i] * step;
+        for (int i = 0; i < pw * ph; i++)
+            plane[i] = (float)qc[i] * step * tree.factor[i];
         idwt2d(plane, pw, ph, pl);
 
         if (!isColor) {

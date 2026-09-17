@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <cmath>
 
 namespace codec {
 
@@ -19,18 +20,22 @@ struct SpihtModels {
 
 struct SpihtTree {
     int W, H, L;
-    std::vector<int> parent;
+    std::vector<int>     parent;
     std::vector<uint8_t> subband;
+    std::vector<uint8_t> lev;       // ★ NEW: 0=LL, 1..L = detail level
+    std::vector<float>   factor;    // ★ NEW: quantization factor per coef
     std::vector<std::vector<int>> children;
-    std::vector<int> llPixels;
+    std::vector<int>     llPixels;
 };
 
+// ---------------- بناء الشجرة + العوامل ----------------
 inline SpihtTree buildSpihtTree(int W, int H, int L) {
     SpihtTree tree;
     tree.W = W; tree.H = H; tree.L = L;
     int N = W * H;
     tree.parent.assign(N, -1);
     tree.subband.assign(N, 0);
+    tree.lev.assign(N, 0);
     tree.children.resize(N);
 
     std::vector<int> Wk(L+1), Hk(L+1);
@@ -40,10 +45,12 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
         Hk[k] = (Hk[k-1] + 1) / 2;
     }
 
+    // LL
     for (int y = 0; y < Hk[L]; y++)
         for (int x = 0; x < Wk[L]; x++) {
             int i = y * W + x;
             tree.subband[i] = 0;
+            tree.lev[i] = 0;
             tree.llPixels.push_back(i);
         }
 
@@ -53,6 +60,7 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
             for (int x = Wk[k]; x < Wk[k-1]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 1;
+                tree.lev[i] = (uint8_t)k;
                 int px, py;
                 if (k == L) { px = x - Wk[L]; py = y; }
                 else        { px = Wk[k+1] + (x - Wk[k]) / 2; py = y / 2; }
@@ -68,6 +76,7 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
             for (int x = 0; x < Wk[k]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 2;
+                tree.lev[i] = (uint8_t)k;
                 int px, py;
                 if (k == L) { px = x; py = y - Hk[L]; }
                 else        { px = x / 2; py = Hk[k+1] + (y - Hk[k]) / 2; }
@@ -83,6 +92,7 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
             for (int x = Wk[k]; x < Wk[k-1]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 3;
+                tree.lev[i] = (uint8_t)k;
                 int px, py;
                 if (k == L) { px = x - Wk[L]; py = y - Hk[L]; }
                 else        { px = Wk[k+1] + (x - Wk[k]) / 2;
@@ -95,9 +105,31 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
             }
         }
     }
+
+    // ★ حساب عوامل التكميم التكيفية ★
+    // factor > 1  → تكميم أقوى (جودة أقل، حجم أصغر)
+    // factor = 1  → تكميم عادي
+    // factor < 1  → تكميم ألطف
+    tree.factor.assign(N, 1.0f);
+    for (int i = 0; i < N; i++) {
+        int sb = tree.subband[i];
+        int lv = tree.lev[i];
+        float f;
+        if (lv == 0) {
+            f = 1.0f;  // LL: أهم → تكميم عادي
+        } else {
+            // التفاصيل الدقيقة (lv=1) تُكمَّم أكثر
+            // التفاصيل الخشنة (lv=L) تُكمَّم أقل
+            f = 1.0f + 0.25f * (float)(L - lv);
+            if (sb == 3) f += 0.4f;   // HH أضعف بصرياً → تكميم أكثر
+        }
+        tree.factor[i] = f;
+    }
+
     return tree;
 }
 
+// ---------------- exp-golomb ----------------
 inline void spihtEncodeUInt(RangeEncoder& enc, BitModel* len, BitModel* val, uint32_t v) {
     uint32_t x = v + 1;
     int k = 0;
@@ -130,7 +162,7 @@ inline void dfsMaxDesc(int i, const SpihtTree& tree,
     maxDescBit[i] = mx;
 }
 
-// ---------- Encoder (FIXED) ----------
+// ---------------- Encoder ----------------
 inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                         std::vector<int>& coefs, const SpihtTree& tree) {
     int N = (int)coefs.size();
@@ -169,7 +201,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
 
-        // ---- LIP ----
         int lipSnapshot = (int)LIP.size();
         for (int k = 0; k < lipSnapshot; k++) {
             int i = LIP[k];
@@ -192,7 +223,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             LIP.swap(newLIP);
         }
 
-        // ---- LIS ----
         int lisIdx = 0;
         while (lisIdx < (int)LIS.size()) {
             LisEntry e = LIS[lisIdx];
@@ -215,7 +245,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                             LIP.push_back(c);
                         }
                     }
-                    // ★ FIX: البنية فقط (مطابقة للـ decoder)
                     bool hasGrand = false;
                     for (int c : tree.children[i])
                         if (!tree.children[c].empty()) { hasGrand = true; break; }
@@ -227,7 +256,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             } else {
                 bool sig = false;
                 {
-                    // Sn(L(i)): هل يوجد أي حفيد ذو قيمة >= bit؟
                     int mx = -1;
                     for (int c : tree.children[i])
                         for (int g : tree.children[c]) {
@@ -246,7 +274,6 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             }
         }
 
-        // ---- Refinement ----
         for (int k = 0; k < lspRefStart; k++) {
             int i = LSP[k];
             int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
@@ -257,7 +284,7 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
     }
 }
 
-// ---------- Decoder ----------
+// ---------------- Decoder ----------------
 inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
                                     const SpihtTree& tree) {
     int N = (int)tree.parent.size();

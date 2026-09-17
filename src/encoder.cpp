@@ -81,13 +81,14 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
         // احسب عدد مستويات DWT المناسب لهذا plane
         int pl = computeLevels(pw, ph);
 
-        dwt2d(planes[p], pw, ph, pl);
+                dwt2d(planes[p], pw, ph, pl);
+
+        SpihtTree tree = buildSpihtTree(pw, ph, pl);
 
         std::vector<int> qc(pw * ph);
         for (int i = 0; i < pw * ph; i++)
-            qc[i] = (int)std::lround(planes[p][i] / step);
+            qc[i] = (int)std::lround(planes[p][i] / (step * tree.factor[i]));
 
-        SpihtTree tree = buildSpihtTree(pw, ph, pl);
         spihtEncode(enc, wm, qc, tree);
     }
 
