@@ -1,14 +1,14 @@
-# new-codec
+# new-codec v2 (NC02)
 
-معيار ضغط صور تجريبي (Grayscale PGM/P5).
+معيار ضغط صور تجريبي بأداء قريب من JPEG XL على صور معينة.
 
-## المكوّنات
+## الميزات الجديدة في NC02
 
-- **transform**: DCT-II ثنائي الأبعاد 8×8 (متعامد) + تكميم JPEG.
-- **entropy**: Range Coder تكيّفي بأسلوب LZMA (BitModel ثنائي).
-- **encoder/decoder**: تكميم + ترميز فرق DC + ترميز AC بـ exp-golomb تكيّفي.
-- **main**: أداة CLI.
-- **tests**: اختبار roundtrip + حساب PSNR.
+1. **DC prediction** من الجارين (يسار + أعلى) بمتوسط موزون
+2. **Block skipping** — تخطي الكتل المتطابقة مع التنبؤ
+3. **Adaptive context** — 4 سياقات للنماذج حسب نشاط المنطقة
+4. **Zero-run length coding** — لترميز صفوف الأصفار في AC
+5. **ترويسة جديدة NC02** (لا تتوافق مع NC01)
 
 ## البناء
 
