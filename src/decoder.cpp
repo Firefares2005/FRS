@@ -108,7 +108,7 @@ Image decodeImage(const std::vector<uint8_t>& data) {
     if (W <= 0 || H <= 0) throw std::runtime_error("decodeImage: bad size");
 
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
-    float step = 1.0f + (float)(qn * 80.0f);
+    float step = 1.0f + (float)(qn * 70.0f);
 
     RangeDecoder dec(data.data() + 14, data.size() - 14);
     SpihtModels  wm;

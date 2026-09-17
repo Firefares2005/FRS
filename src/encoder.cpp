@@ -46,7 +46,7 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     if (C != 1 && C != 3) throw std::runtime_error("encodeImage: bad channels");
 
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
-    float step = 1.0f + (float)(qn * 80.0f);
+    float step = 1.0f + (float)(qn * 70.0f);
 
     // ★ قرار 4:4:4 مقابل 4:2:0
     bool use444 = false;
