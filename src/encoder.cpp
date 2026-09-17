@@ -18,15 +18,42 @@ static int computeLevels(int W, int H) {
     return lv < 1 ? 1 : lv;
 }
 
+// ★ حساب "تفصيل الصورة" — متوسط التدرج الأفقي/الرأسي
+static float detailScore(const Image& img) {
+    if (img.channels != 3) return 0.0f;
+    const int W = img.width, H = img.height;
+    double sum = 0;
+    long cnt = 0;
+    for (int y = 1; y < H; y++) {
+        for (int x = 1; x < W; x++) {
+            int idx  = (y * W + x) * 3;
+            int idxL = (y * W + x - 1) * 3;
+            int idxU = ((y - 1) * W + x) * 3;
+            // استخدام قناة Y تقديرياً (R+G+B)/3
+            float Y  = (img.pixels[idx]   + img.pixels[idx+1]   + img.pixels[idx+2])   / 3.0f;
+            float YL = (img.pixels[idxL]  + img.pixels[idxL+1]  + img.pixels[idxL+2])  / 3.0f;
+            float YU = (img.pixels[idxU]  + img.pixels[idxU+1]  + img.pixels[idxU+2])  / 3.0f;
+            sum += std::abs(Y - YL) + std::abs(Y - YU);
+            cnt += 2;
+        }
+    }
+    return cnt > 0 ? (float)(sum / cnt) : 0.0f;
+}
+
 std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     const int W = img.width, H = img.height, C = img.channels;
     if (W <= 0 || H <= 0) throw std::runtime_error("encodeImage: bad size");
     if (C != 1 && C != 3) throw std::runtime_error("encodeImage: bad channels");
 
-    const int levels = computeLevels(W, H);
-
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
     float step = 1.0f + (float)(qn * 80.0f);
+
+    // ★ قرار 4:4:4 مقابل 4:2:0
+    bool use444 = false;
+    if (C == 3) {
+        float d = detailScore(img);
+        use444 = (d > 12.0f);   // عتبة مضبوطة تجريبياً
+    }
 
     std::vector<std::vector<float>> planes;
     std::vector<std::pair<int,int>> planeSizes;
@@ -47,41 +74,51 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
             Cb[i] = -0.1687f*R - 0.3313f*G + 0.5f*B;
             Cr[i] =  0.5f*R - 0.4187f*G - 0.0813f*B;
         }
-        int sw = (W + 1) / 2, sh = (H + 1) / 2;
-        std::vector<float> Cbs(sw * sh), Crs(sw * sh);
-        for (int y = 0; y < sh; y++)
-            for (int x = 0; x < sw; x++) {
-                float sumCb = 0, sumCr = 0;
-                int cnt = 0;
-                for (int dy = 0; dy < 2; dy++)
-                    for (int dx = 0; dx < 2; dx++) {
-                        int yy = y*2 + dy, xx = x*2 + dx;
-                        if (yy >= H || xx >= W) continue;
-                        sumCb += Cb[yy*W + xx];
-                        sumCr += Cr[yy*W + xx];
-                        cnt++;
-                    }
-                Cbs[y*sw + x] = sumCb / cnt;
-                Crs[y*sw + x] = sumCr / cnt;
-            }
-        planes.push_back(std::move(Y));    planeSizes.push_back({W, H});
-        planes.push_back(std::move(Cbs));  planeSizes.push_back({sw, sh});
-        planes.push_back(std::move(Crs));  planeSizes.push_back({sw, sh});
+
+        if (use444) {
+            // 4:4:4 — chroma بنفس الدقة
+            planes.push_back(std::move(Y));    planeSizes.push_back({W, H});
+            planes.push_back(std::move(Cb));   planeSizes.push_back({W, H});
+            planes.push_back(std::move(Cr));   planeSizes.push_back({W, H});
+        } else {
+            // 4:2:0 — chroma بنصف الدقة
+            int sw = (W + 1) / 2, sh = (H + 1) / 2;
+            std::vector<float> Cbs(sw * sh), Crs(sw * sh);
+            for (int y = 0; y < sh; y++)
+                for (int x = 0; x < sw; x++) {
+                    float sCb = 0, sCr = 0;
+                    int cnt = 0;
+                    for (int dy = 0; dy < 2; dy++)
+                        for (int dx = 0; dx < 2; dx++) {
+                            int yy = y*2 + dy, xx = x*2 + dx;
+                            if (yy >= H || xx >= W) continue;
+                            sCb += Cb[yy*W + xx];
+                            sCr += Cr[yy*W + xx];
+                            cnt++;
+                        }
+                    Cbs[y*sw + x] = sCb / cnt;
+                    Crs[y*sw + x] = sCr / cnt;
+                }
+            planes.push_back(std::move(Y));    planeSizes.push_back({W, H});
+            planes.push_back(std::move(Cbs));  planeSizes.push_back({sw, sh});
+            planes.push_back(std::move(Crs));  planeSizes.push_back({sw, sh});
+        }
     }
 
     RangeEncoder enc;
     SpihtModels  wm;
 
-    enc.encodeBit(wm.sigCtx[0], (C == 3) ? 1 : 0);
+    // راية اللون + راية 4:4:4
+    enc.encodeBit(wm.sigCtx[0][0][0], (C == 3) ? 1 : 0);
+    if (C == 3)
+        enc.encodeBit(wm.sigCtx[1][0][0], use444 ? 1 : 0);
 
     for (size_t p = 0; p < planes.size(); p++) {
         int pw = planeSizes[p].first;
         int ph = planeSizes[p].second;
-
-        // احسب عدد مستويات DWT المناسب لهذا plane
         int pl = computeLevels(pw, ph);
 
-                dwt2d(planes[p], pw, ph, pl);
+        dwt2d(planes[p], pw, ph, pl);
 
         SpihtTree tree = buildSpihtTree(pw, ph, pl);
 
@@ -97,7 +134,7 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     std::vector<uint8_t> out;
     out.reserve(enc.data().size() + 14);
     out.push_back('N'); out.push_back('C');
-    out.push_back('0'); out.push_back('6');
+    out.push_back('0'); out.push_back('8');
     auto push32 = [&](uint32_t v) {
         out.push_back((uint8_t)( v        & 0xFF));
         out.push_back((uint8_t)((v >>  8) & 0xFF));

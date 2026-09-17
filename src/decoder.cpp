@@ -16,10 +16,25 @@ static int computeLevels(int W, int H) {
     return lv < 1 ? 1 : lv;
 }
 
+// ★ فك plane واحد وإرجاعه بحجمه الكامل
+static std::vector<float> decodePlane(RangeDecoder& dec, SpihtModels& m,
+                                      int pw, int ph, float step) {
+    int pl = computeLevels(pw, ph);
+    SpihtTree tree = buildSpihtTree(pw, ph, pl);
+    std::vector<int> qc = spihtDecode(dec, m, tree);
+
+    std::vector<float> plane(pw * ph);
+    for (int i = 0; i < pw * ph; i++)
+        plane[i] = (float)qc[i] * step * tree.factor[i];
+
+    idwt2d(plane, pw, ph, pl);
+    return plane;
+}
+
 Image decodeImage(const std::vector<uint8_t>& data) {
     if (data.size() < 14) throw std::runtime_error("decodeImage: too small");
-    if (!(data[0]=='N' && data[1]=='C' && data[2]=='0' && data[3]=='6'))
-        throw std::runtime_error("decodeImage: bad magic (expect NC06)");
+    if (!(data[0]=='N' && data[1]=='C' && data[2]=='0' && data[3]=='8'))
+        throw std::runtime_error("decodeImage: bad magic (expect NC08)");
 
     auto rd32 = [&](size_t off) -> uint32_t {
         return  (uint32_t)data[off]
@@ -40,73 +55,77 @@ Image decodeImage(const std::vector<uint8_t>& data) {
     RangeDecoder dec(data.data() + 14, data.size() - 14);
     SpihtModels  wm;
 
-    int isColor = dec.decodeBit(wm.sigCtx[0]);
+    int isColor = dec.decodeBit(wm.sigCtx[0][0][0]);
+    int use444  = 0;
+    if (isColor)
+        use444 = dec.decodeBit(wm.sigCtx[1][0][0]);
 
     Image img;
     img.width = W; img.height = H;
     img.channels = isColor ? 3 : 1;
     img.pixels.assign((size_t)W * H * img.channels, 0);
 
-    int sw = (W + 1) / 2, sh = (H + 1) / 2;
+    // ---- Y plane ----
+    std::vector<float> Yv = decodePlane(dec, wm, W, H, step);
 
-    // ---- decode Y plane ----
-    {
-        int pw = W, ph = H;
-                int pl = computeLevels(pw, ph);
-        SpihtTree tree = buildSpihtTree(pw, ph, pl);
-        std::vector<int> qc = spihtDecode(dec, wm, tree);
-
-        std::vector<float> plane(pw * ph);
-        for (int i = 0; i < pw * ph; i++)
-            plane[i] = (float)qc[i] * step * tree.factor[i];
-        idwt2d(plane, pw, ph, pl);
-
-        if (!isColor) {
-            for (int i = 0; i < W * H; i++) {
-                int v = (int)std::lround(plane[i] + 128.0f);
-                if (v < 0) v = 0; if (v > 255) v = 255;
-                img.pixels[i] = (uint8_t)v;
-            }
-            return img;
+    if (!isColor) {
+        for (int i = 0; i < W * H; i++) {
+            int v = (int)std::lround(Yv[i] + 128.0f);
+            if (v < 0) v = 0; if (v > 255) v = 255;
+            img.pixels[i] = (uint8_t)v;
         }
+        return img;
+    }
 
-        std::vector<float> Yv(W * H);
-        for (int i = 0; i < W * H; i++) Yv[i] = plane[i] + 128.0f;
+    for (int i = 0; i < W * H; i++) Yv[i] += 128.0f;
 
-        // Cb
-        int plB = computeLevels(sw, sh);
-        SpihtTree treeB = buildSpihtTree(sw, sh, plB);
-        std::vector<int> qcB = spihtDecode(dec, wm, treeB);
-        std::vector<float> Cbv(sw * sh);
-        for (int i = 0; i < sw * sh; i++) Cbv[i] = (float)qcB[i] * step;
-        idwt2d(Cbv, sw, sh, plB);
-
-        // Cr
-        int plR = computeLevels(sw, sh);
-        SpihtTree treeR = buildSpihtTree(sw, sh, plR);
-        std::vector<int> qcR = spihtDecode(dec, wm, treeR);
-        std::vector<float> Crv(sw * sh);
-        for (int i = 0; i < sw * sh; i++) Crv[i] = (float)qcR[i] * step;
-        idwt2d(Crv, sw, sh, plR);
+    if (use444) {
+        // 4:4:4
+        std::vector<float> Cbv = decodePlane(dec, wm, W, H, step);
+        std::vector<float> Crv = decodePlane(dec, wm, W, H, step);
 
         for (int y = 0; y < H; y++) {
             for (int x = 0; x < W; x++) {
-                float Y  = Yv[y * W + x];
+                int i = y * W + x;
+                float Y  = Yv[i];
+                float Cb = Cbv[i];
+                float Cr = Crv[i];
+                float R = Y + 1.402f * Cr;
+                float G = Y - 0.344136f * Cb - 0.714136f * Cr;
+                float B = Y + 1.772f * Cb;
+                auto clip = [](float v) {
+                    int i = (int)std::lround(v);
+                    return (uint8_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
+                };
+                int idx = i * 3;
+                img.pixels[idx + 0] = clip(R);
+                img.pixels[idx + 1] = clip(G);
+                img.pixels[idx + 2] = clip(B);
+            }
+        }
+    } else {
+        // 4:2:0
+        int sw = (W + 1) / 2, sh = (H + 1) / 2;
+        std::vector<float> Cbv = decodePlane(dec, wm, sw, sh, step);
+        std::vector<float> Crv = decodePlane(dec, wm, sw, sh, step);
+
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                int i = y * W + x;
+                float Y  = Yv[i];
                 int cx = x / 2, cy = y / 2;
                 if (cx >= sw) cx = sw - 1;
                 if (cy >= sh) cy = sh - 1;
                 float Cb = Cbv[cy * sw + cx];
                 float Cr = Crv[cy * sw + cx];
-
                 float R = Y + 1.402f * Cr;
                 float G = Y - 0.344136f * Cb - 0.714136f * Cr;
                 float B = Y + 1.772f * Cb;
-
                 auto clip = [](float v) {
                     int i = (int)std::lround(v);
                     return (uint8_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
                 };
-                int idx = (y * W + x) * 3;
+                int idx = i * 3;
                 img.pixels[idx + 0] = clip(R);
                 img.pixels[idx + 1] = clip(G);
                 img.pixels[idx + 2] = clip(B);

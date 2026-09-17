@@ -8,27 +8,36 @@
 
 namespace codec {
 
+// ---------- نماذج موسّعة (EBCOT-like) ----------
 struct SpihtModels {
     BitModel maxBitLen[24];
     BitModel maxBitVal[24];
-    BitModel sigCtx[4];
-    BitModel signCtx[4];
+
+    // Significance: [nSig 0..4][subband 0..3][parentSig 0..1]
+    BitModel sigCtx[5][4][2];
+
+    // Sign: [subband][h-sign][v-sign]  (h/v: 0=negative, 1=positive, 2=unknown)
+    BitModel signCtx[4][3][3];
+
+    // Set significance
     BitModel setSigACtx[4];
     BitModel setSigBCtx[4];
-    BitModel refCtx[4];
+
+    // Refinement: [subband][bitPosition 0..3]
+    BitModel refCtx[4][4];
 };
 
+// ---------- الشجرة + عوامل التكميم ----------
 struct SpihtTree {
     int W, H, L;
     std::vector<int>     parent;
     std::vector<uint8_t> subband;
-    std::vector<uint8_t> lev;       // ★ NEW: 0=LL, 1..L = detail level
-    std::vector<float>   factor;    // ★ NEW: quantization factor per coef
+    std::vector<uint8_t> lev;
+    std::vector<float>   factor;
     std::vector<std::vector<int>> children;
     std::vector<int>     llPixels;
 };
 
-// ---------------- بناء الشجرة + العوامل ----------------
 inline SpihtTree buildSpihtTree(int W, int H, int L) {
     SpihtTree tree;
     tree.W = W; tree.H = H; tree.L = L;
@@ -45,7 +54,6 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
         Hk[k] = (Hk[k-1] + 1) / 2;
     }
 
-    // LL
     for (int y = 0; y < Hk[L]; y++)
         for (int x = 0; x < Wk[L]; x++) {
             int i = y * W + x;
@@ -55,8 +63,8 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
         }
 
     for (int k = 1; k <= L; k++) {
-        // HL_k
-        for (int y = 0; y < Hk[k]; y++) {
+        // HL
+        for (int y = 0; y < Hk[k]; y++)
             for (int x = Wk[k]; x < Wk[k-1]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 1;
@@ -70,9 +78,8 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
                     tree.children[pidx].push_back(i);
                 }
             }
-        }
-        // LH_k
-        for (int y = Hk[k]; y < Hk[k-1]; y++) {
+        // LH
+        for (int y = Hk[k]; y < Hk[k-1]; y++)
             for (int x = 0; x < Wk[k]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 2;
@@ -86,9 +93,8 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
                     tree.children[pidx].push_back(i);
                 }
             }
-        }
-        // HH_k
-        for (int y = Hk[k]; y < Hk[k-1]; y++) {
+        // HH
+        for (int y = Hk[k]; y < Hk[k-1]; y++)
             for (int x = Wk[k]; x < Wk[k-1]; x++) {
                 int i = y * W + x;
                 tree.subband[i] = 3;
@@ -103,33 +109,25 @@ inline SpihtTree buildSpihtTree(int W, int H, int L) {
                     tree.children[pidx].push_back(i);
                 }
             }
-        }
     }
 
-    // ★ حساب عوامل التكميم التكيفية ★
-    // factor > 1  → تكميم أقوى (جودة أقل، حجم أصغر)
-    // factor = 1  → تكميم عادي
-    // factor < 1  → تكميم ألطف
+    // Adaptive quantization factors
     tree.factor.assign(N, 1.0f);
     for (int i = 0; i < N; i++) {
         int sb = tree.subband[i];
         int lv = tree.lev[i];
         float f;
-        if (lv == 0) {
-            f = 1.0f;  // LL: أهم → تكميم عادي
-        } else {
-            // التفاصيل الدقيقة (lv=1) تُكمَّم أكثر
-            // التفاصيل الخشنة (lv=L) تُكمَّم أقل
+        if (lv == 0) f = 1.0f;
+        else {
             f = 1.0f + 0.25f * (float)(L - lv);
-            if (sb == 3) f += 0.4f;   // HH أضعف بصرياً → تكميم أكثر
+            if (sb == 3) f += 0.4f;
         }
         tree.factor[i] = f;
     }
-
     return tree;
 }
 
-// ---------------- exp-golomb ----------------
+// ---------- exp-golomb ----------
 inline void spihtEncodeUInt(RangeEncoder& enc, BitModel* len, BitModel* val, uint32_t v) {
     uint32_t x = v + 1;
     int k = 0;
@@ -140,7 +138,6 @@ inline void spihtEncodeUInt(RangeEncoder& enc, BitModel* len, BitModel* val, uin
     for (int i = k - 1; i >= 0; i--)
         enc.encodeBit(val[i], (int)((rem >> i) & 1));
 }
-
 inline uint32_t spihtDecodeUInt(RangeDecoder& dec, BitModel* len, BitModel* val) {
     int k = 0;
     while (k < 23 && dec.decodeBit(len[k]) == 0) k++;
@@ -162,10 +159,19 @@ inline void dfsMaxDesc(int i, const SpihtTree& tree,
     maxDescBit[i] = mx;
 }
 
-// ---------------- Encoder ----------------
+// ---------- Sign context helper (EBCOT-like) ----------
+// 0 = negative, 1 = positive, 2 = unknown/not-significant
+inline int signClass(int s) {
+    if (s < 0) return 0;
+    if (s > 0) return 1;
+    return 2;
+}
+
+// ---------- Encoder ----------
 inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                         std::vector<int>& coefs, const SpihtTree& tree) {
     int N = (int)coefs.size();
+    int W = tree.W;
 
     int maxAbs = 0;
     for (int i = 0; i < N; i++) {
@@ -201,6 +207,7 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
 
+        // ---- LIP ----
         int lipSnapshot = (int)LIP.size();
         for (int k = 0; k < lipSnapshot; k++) {
             int i = LIP[k];
@@ -208,12 +215,41 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
             int sb = tree.subband[i];
             if (a >= mask) {
-                enc.encodeBit(m.sigCtx[sb], 1);
-                enc.encodeBit(m.signCtx[sb], coefs[i] < 0 ? 1 : 0);
+                // Context: عدد الجيران المُهمَّة (4-connectivity)
+                int y = i / W, x = i % W;
+                int nSig = 0;
+                if (x > 0     && inLSP[i-1]) nSig++;
+                if (x < W - 1 && inLSP[i+1]) nSig++;
+                if (y > 0     && inLSP[i-W]) nSig++;
+                if (y < tree.H - 1 && inLSP[i+W]) nSig++;
+                int pidx = tree.parent[i];
+                int pSig = (pidx >= 0 && inLSP[pidx]) ? 1 : 0;
+                if (nSig > 4) nSig = 4;
+
+                enc.encodeBit(m.sigCtx[nSig][sb][pSig], 1);
+
+                // Sign context: من إشارات الجيران المُهمَّة
+                int hSign = 2, vSign = 2;
+                if (x > 0     && inLSP[i-1]) hSign = signClass(coefs[i-1]);
+                if (x < W - 1 && inLSP[i+1] && hSign == 2) hSign = signClass(coefs[i+1]);
+                if (y > 0     && inLSP[i-W]) vSign = signClass(coefs[i-W]);
+                if (y < tree.H - 1 && inLSP[i+W] && vSign == 2)
+                    vSign = signClass(coefs[i+W]);
+                enc.encodeBit(m.signCtx[sb][hSign][vSign], coefs[i] < 0 ? 1 : 0);
+
                 LSP.push_back(i);
                 inLSP[i] = 1;
             } else {
-                enc.encodeBit(m.sigCtx[sb], 0);
+                int y = i / W, x = i % W;
+                int nSig = 0;
+                if (x > 0     && inLSP[i-1]) nSig++;
+                if (x < W - 1 && inLSP[i+1]) nSig++;
+                if (y > 0     && inLSP[i-W]) nSig++;
+                if (y < tree.H - 1 && inLSP[i+W]) nSig++;
+                int pidx = tree.parent[i];
+                int pSig = (pidx >= 0 && inLSP[pidx]) ? 1 : 0;
+                if (nSig > 4) nSig = 4;
+                enc.encodeBit(m.sigCtx[nSig][sb][pSig], 0);
             }
         }
         {
@@ -223,6 +259,7 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             LIP.swap(newLIP);
         }
 
+        // ---- LIS ----
         int lisIdx = 0;
         while (lisIdx < (int)LIS.size()) {
             LisEntry e = LIS[lisIdx];
@@ -236,12 +273,40 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
                         int ca = coefs[c] < 0 ? -coefs[c] : coefs[c];
                         int csb = tree.subband[c];
                         if (ca >= mask) {
-                            enc.encodeBit(m.sigCtx[csb], 1);
-                            enc.encodeBit(m.signCtx[csb], coefs[c] < 0 ? 1 : 0);
+                            int cy = c / W, cx = c % W;
+                            int cns = 0;
+                            if (cx > 0 && inLSP[c-1]) cns++;
+                            if (cx < W-1 && inLSP[c+1]) cns++;
+                            if (cy > 0 && inLSP[c-W]) cns++;
+                            if (cy < tree.H-1 && inLSP[c+W]) cns++;
+                            if (cns > 4) cns = 4;
+                            int cp = tree.parent[c];
+                            int cpSig = (cp >= 0 && inLSP[cp]) ? 1 : 0;
+                            enc.encodeBit(m.sigCtx[cns][csb][cpSig], 1);
+
+                            int chS = 2, cvS = 2;
+                            if (cx > 0 && inLSP[c-1]) chS = signClass(coefs[c-1]);
+                            if (cx < W-1 && inLSP[c+1] && chS == 2)
+                                chS = signClass(coefs[c+1]);
+                            if (cy > 0 && inLSP[c-W]) cvS = signClass(coefs[c-W]);
+                            if (cy < tree.H-1 && inLSP[c+W] && cvS == 2)
+                                cvS = signClass(coefs[c+W]);
+                            enc.encodeBit(m.signCtx[csb][chS][cvS],
+                                          coefs[c] < 0 ? 1 : 0);
+
                             LSP.push_back(c);
                             inLSP[c] = 1;
                         } else {
-                            enc.encodeBit(m.sigCtx[csb], 0);
+                            int cy = c / W, cx = c % W;
+                            int cns = 0;
+                            if (cx > 0 && inLSP[c-1]) cns++;
+                            if (cx < W-1 && inLSP[c+1]) cns++;
+                            if (cy > 0 && inLSP[c-W]) cns++;
+                            if (cy < tree.H-1 && inLSP[c+W]) cns++;
+                            if (cns > 4) cns = 4;
+                            int cp = tree.parent[c];
+                            int cpSig = (cp >= 0 && inLSP[cp]) ? 1 : 0;
+                            enc.encodeBit(m.sigCtx[cns][csb][cpSig], 0);
                             LIP.push_back(c);
                         }
                     }
@@ -274,20 +339,23 @@ inline void spihtEncode(RangeEncoder& enc, SpihtModels& m,
             }
         }
 
+        // ---- Refinement ----
         for (int k = 0; k < lspRefStart; k++) {
             int i = LSP[k];
             int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
             int b = (a >> bit) & 1;
-            enc.encodeBit(m.refCtx[tree.subband[i]], b);
+            int rctx = bit & 3;
+            enc.encodeBit(m.refCtx[tree.subband[i]][rctx], b);
         }
         lspRefStart = (int)LSP.size();
     }
 }
 
-// ---------------- Decoder ----------------
+// ---------- Decoder ----------
 inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
                                     const SpihtTree& tree) {
     int N = (int)tree.parent.size();
+    int W = tree.W;
     std::vector<int> coefs(N, 0);
 
     int maxBit = (int)spihtDecodeUInt(dec, m.maxBitLen, m.maxBitVal);
@@ -304,14 +372,32 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
     for (int bit = maxBit; bit >= 0; bit--) {
         int mask = 1 << bit;
 
+        // ---- LIP ----
         int lipSnapshot = (int)LIP.size();
         for (int k = 0; k < lipSnapshot; k++) {
             int i = LIP[k];
             if (inLSP[i]) continue;
             int sb = tree.subband[i];
-            int sig = dec.decodeBit(m.sigCtx[sb]);
+            int y = i / W, x = i % W;
+            int nSig = 0;
+            if (x > 0     && inLSP[i-1]) nSig++;
+            if (x < W - 1 && inLSP[i+1]) nSig++;
+            if (y > 0     && inLSP[i-W]) nSig++;
+            if (y < tree.H - 1 && inLSP[i+W]) nSig++;
+            if (nSig > 4) nSig = 4;
+            int pidx = tree.parent[i];
+            int pSig = (pidx >= 0 && inLSP[pidx]) ? 1 : 0;
+
+            int sig = dec.decodeBit(m.sigCtx[nSig][sb][pSig]);
             if (sig) {
-                int sign = dec.decodeBit(m.signCtx[sb]);
+                int hSign = 2, vSign = 2;
+                if (x > 0     && inLSP[i-1]) hSign = signClass(coefs[i-1]);
+                if (x < W - 1 && inLSP[i+1] && hSign == 2) hSign = signClass(coefs[i+1]);
+                if (y > 0     && inLSP[i-W]) vSign = signClass(coefs[i-W]);
+                if (y < tree.H - 1 && inLSP[i+W] && vSign == 2)
+                    vSign = signClass(coefs[i+W]);
+
+                int sign = dec.decodeBit(m.signCtx[sb][hSign][vSign]);
                 coefs[i] = mask;
                 if (sign) coefs[i] = -coefs[i];
                 LSP.push_back(i);
@@ -325,6 +411,7 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
             LIP.swap(newLIP);
         }
 
+        // ---- LIS ----
         int lisIdx = 0;
         while (lisIdx < (int)LIS.size()) {
             LisEntry e = LIS[lisIdx];
@@ -335,9 +422,27 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
                 if (sig) {
                     for (int c : tree.children[i]) {
                         int csb = tree.subband[c];
-                        int csig = dec.decodeBit(m.sigCtx[csb]);
+                        int cy = c / W, cx = c % W;
+                        int cns = 0;
+                        if (cx > 0 && inLSP[c-1]) cns++;
+                        if (cx < W-1 && inLSP[c+1]) cns++;
+                        if (cy > 0 && inLSP[c-W]) cns++;
+                        if (cy < tree.H-1 && inLSP[c+W]) cns++;
+                        if (cns > 4) cns = 4;
+                        int cp = tree.parent[c];
+                        int cpSig = (cp >= 0 && inLSP[cp]) ? 1 : 0;
+
+                        int csig = dec.decodeBit(m.sigCtx[cns][csb][cpSig]);
                         if (csig) {
-                            int sign = dec.decodeBit(m.signCtx[csb]);
+                            int chS = 2, cvS = 2;
+                            if (cx > 0 && inLSP[c-1]) chS = signClass(coefs[c-1]);
+                            if (cx < W-1 && inLSP[c+1] && chS == 2)
+                                chS = signClass(coefs[c+1]);
+                            if (cy > 0 && inLSP[c-W]) cvS = signClass(coefs[c-W]);
+                            if (cy < tree.H-1 && inLSP[c+W] && cvS == 2)
+                                cvS = signClass(coefs[c+W]);
+
+                            int sign = dec.decodeBit(m.signCtx[csb][chS][cvS]);
                             coefs[c] = mask;
                             if (sign) coefs[c] = -coefs[c];
                             LSP.push_back(c);
@@ -365,9 +470,11 @@ inline std::vector<int> spihtDecode(RangeDecoder& dec, SpihtModels& m,
             }
         }
 
+        // ---- Refinement ----
         for (int k = 0; k < lspRefStart; k++) {
             int i = LSP[k];
-            int b = dec.decodeBit(m.refCtx[tree.subband[i]]);
+            int rctx = bit & 3;
+            int b = dec.decodeBit(m.refCtx[tree.subband[i]][rctx]);
             if (b) {
                 int a = coefs[i] < 0 ? -coefs[i] : coefs[i];
                 a |= mask;
