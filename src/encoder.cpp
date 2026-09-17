@@ -18,7 +18,6 @@ static int computeLevels(int W, int H) {
     return lv < 1 ? 1 : lv;
 }
 
-// ★ حساب "تفصيل الصورة" — متوسط التدرج الأفقي/الرأسي
 static float detailScore(const Image& img) {
     if (img.channels != 3) return 0.0f;
     const int W = img.width, H = img.height;
@@ -29,7 +28,6 @@ static float detailScore(const Image& img) {
             int idx  = (y * W + x) * 3;
             int idxL = (y * W + x - 1) * 3;
             int idxU = ((y - 1) * W + x) * 3;
-            // استخدام قناة Y تقديرياً (R+G+B)/3
             float Y  = (img.pixels[idx]   + img.pixels[idx+1]   + img.pixels[idx+2])   / 3.0f;
             float YL = (img.pixels[idxL]  + img.pixels[idxL+1]  + img.pixels[idxL+2])  / 3.0f;
             float YU = (img.pixels[idxU]  + img.pixels[idxU+1]  + img.pixels[idxU+2])  / 3.0f;
@@ -41,18 +39,37 @@ static float detailScore(const Image& img) {
 }
 
 std::vector<uint8_t> encodeImage(const Image& img, int quality) {
-    const int W = img.width, H = img.height, C = img.channels;
-    if (W <= 0 || H <= 0) throw std::runtime_error("encodeImage: bad size");
+    const int origW = img.width, origH = img.height, C = img.channels;
+    if (origW <= 0 || origH <= 0) throw std::runtime_error("encodeImage: bad size");
     if (C != 1 && C != 3) throw std::runtime_error("encodeImage: bad channels");
+
+    // ★ padding لأبعاد مضاعفة 64
+    int W = ((origW + 63) / 64) * 64;
+    int H = ((origH + 63) / 64) * 64;
+
+    Image imgCopy;
+    const Image* imgRef = &img;
+    if (W != origW || H != origH) {
+        imgCopy.width  = W;
+        imgCopy.height = H;
+        imgCopy.channels = C;
+        imgCopy.pixels.assign((size_t)W * H * C, 0);
+        for (int y = 0; y < origH; y++)
+            for (int x = 0; x < origW; x++)
+                for (int c = 0; c < C; c++)
+                    imgCopy.pixels[((size_t)y * W + x) * C + c] =
+                        img.pixels[((size_t)y * origW + x) * C + c];
+        imgRef = &imgCopy;
+    }
+    const Image& realImg = *imgRef;
 
     double qn = (100 - std::min(100, std::max(0, quality))) / 100.0;
     float step = 1.0f + (float)(qn * 70.0f);
 
-    // ★ قرار 4:4:4 مقابل 4:2:0
     bool use444 = false;
     if (C == 3) {
-        float d = detailScore(img);
-        use444 = (d > 12.0f);   // عتبة مضبوطة تجريبياً
+        float d = detailScore(realImg);
+        use444 = (d > 10.0f);
     }
 
     std::vector<std::vector<float>> planes;
@@ -61,27 +78,25 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     if (C == 1) {
         std::vector<float> Y(W * H);
         for (int i = 0; i < W * H; i++)
-            Y[i] = (float)img.pixels[i] - 128.0f;
+            Y[i] = (float)realImg.pixels[i] - 128.0f;
         planes.push_back(std::move(Y));
         planeSizes.push_back({W, H});
     } else {
         std::vector<float> Y(W * H), Cb(W * H), Cr(W * H);
         for (int i = 0; i < W * H; i++) {
-            float R = img.pixels[i*3 + 0];
-            float G = img.pixels[i*3 + 1];
-            float B = img.pixels[i*3 + 2];
+            float R = realImg.pixels[i*3 + 0];
+            float G = realImg.pixels[i*3 + 1];
+            float B = realImg.pixels[i*3 + 2];
             Y[i]  =  0.299f*R + 0.587f*G + 0.114f*B - 128.0f;
             Cb[i] = -0.1687f*R - 0.3313f*G + 0.5f*B;
             Cr[i] =  0.5f*R - 0.4187f*G - 0.0813f*B;
         }
 
         if (use444) {
-            // 4:4:4 — chroma بنفس الدقة
             planes.push_back(std::move(Y));    planeSizes.push_back({W, H});
             planes.push_back(std::move(Cb));   planeSizes.push_back({W, H});
             planes.push_back(std::move(Cr));   planeSizes.push_back({W, H});
         } else {
-            // 4:2:0 — chroma بنصف الدقة
             int sw = (W + 1) / 2, sh = (H + 1) / 2;
             std::vector<float> Cbs(sw * sh), Crs(sw * sh);
             for (int y = 0; y < sh; y++)
@@ -108,7 +123,6 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     RangeEncoder enc;
     SpihtModels  wm;
 
-    // راية اللون + راية 4:4:4
     enc.encodeBit(wm.sigCtx[0][0][0], (C == 3) ? 1 : 0);
     if (C == 3)
         enc.encodeBit(wm.sigCtx[1][0][0], use444 ? 1 : 0);
@@ -123,8 +137,14 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
         SpihtTree tree = buildSpihtTree(pw, ph, pl);
 
         std::vector<int> qc(pw * ph);
-        for (int i = 0; i < pw * ph; i++)
-            qc[i] = (int)std::lround(planes[p][i] / (step * tree.factor[i]));
+        for (int i = 0; i < pw * ph; i++) {
+            float delta = step * tree.factor[i];
+            float x = planes[p][i];
+            float ax = std::abs(x);
+            int q = (int)(ax / delta + 0.35f);
+            if (x < 0) q = -q;
+            qc[i] = q;
+        }
 
         spihtEncode(enc, wm, qc, tree);
     }
@@ -134,15 +154,15 @@ std::vector<uint8_t> encodeImage(const Image& img, int quality) {
     std::vector<uint8_t> out;
     out.reserve(enc.data().size() + 14);
     out.push_back('N'); out.push_back('C');
-    out.push_back('0'); out.push_back('8');
+    out.push_back('0'); out.push_back('9');
     auto push32 = [&](uint32_t v) {
         out.push_back((uint8_t)( v        & 0xFF));
         out.push_back((uint8_t)((v >>  8) & 0xFF));
         out.push_back((uint8_t)((v >> 16) & 0xFF));
         out.push_back((uint8_t)((v >> 24) & 0xFF));
     };
-    push32((uint32_t)W);
-    push32((uint32_t)H);
+    push32((uint32_t)origW);
+    push32((uint32_t)origH);
     out.push_back((uint8_t)quality);
     out.push_back((uint8_t)C);
 
